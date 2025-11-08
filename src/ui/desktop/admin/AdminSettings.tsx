@@ -87,6 +87,8 @@ export function AdminSettings({
   });
   const [oidcLoading, setOidcLoading] = React.useState(false);
   const [oidcError, setOidcError] = React.useState<string | null>(null);
+  const [oidcSource, setOidcSource] = React.useState<string>("database");
+  const [oidcReadonly, setOidcReadonly] = React.useState(false);
 
   const [users, setUsers] = React.useState<
     Array<{
@@ -150,7 +152,12 @@ export function AdminSettings({
 
     getAdminOIDCConfig()
       .then((res) => {
-        if (res) setOidcConfig(res);
+        if (res) {
+          const { _source, _readonly, ...config } = res;
+          setOidcConfig(config);
+          if (_source) setOidcSource(_source);
+          if (_readonly !== undefined) setOidcReadonly(_readonly);
+        }
       })
       .catch((err) => {
         if (!err.message?.includes("No server configured")) {
@@ -736,6 +743,30 @@ export function AdminSettings({
                   </Button>
                 </div>
 
+                {oidcSource === "environment" && (
+                  <Alert>
+                    <AlertTitle>Configuration from Environment Variables</AlertTitle>
+                    <AlertDescription>
+                      OIDC configuration is currently loaded from environment variables and cannot be modified through the admin panel.
+                      To change the configuration, update the environment variables and restart the server.
+                      <div className="mt-2 text-xs">
+                        <strong>Environment variables:</strong>
+                        <ul className="list-disc list-inside mt-1">
+                          <li>OIDC_CLIENT_ID</li>
+                          <li>OIDC_CLIENT_SECRET</li>
+                          <li>OIDC_ISSUER_URL</li>
+                          <li>OIDC_AUTHORIZATION_URL</li>
+                          <li>OIDC_TOKEN_URL</li>
+                          <li>OIDC_USERINFO_URL (optional)</li>
+                          <li>OIDC_IDENTIFIER_PATH (optional, default: "sub")</li>
+                          <li>OIDC_NAME_PATH (optional, default: "name")</li>
+                          <li>OIDC_SCOPES (optional, default: "openid email profile")</li>
+                        </ul>
+                      </div>
+                    </AlertDescription>
+                  </Alert>
+                )}
+
                 {!allowPasswordLogin && (
                   <Alert variant="destructive">
                     <AlertTitle>{t("admin.criticalWarning")}</AlertTitle>
@@ -763,6 +794,7 @@ export function AdminSettings({
                       }
                       placeholder={t("placeholders.clientId")}
                       required
+                      disabled={oidcReadonly}
                     />
                   </div>
                   <div className="space-y-2">
@@ -777,6 +809,7 @@ export function AdminSettings({
                       }
                       placeholder={t("placeholders.clientSecret")}
                       required
+                      disabled={oidcReadonly}
                     />
                   </div>
                   <div className="space-y-2">
@@ -794,6 +827,7 @@ export function AdminSettings({
                       }
                       placeholder={t("placeholders.authUrl")}
                       required
+                      disabled={oidcReadonly}
                     />
                   </div>
                   <div className="space-y-2">
@@ -806,6 +840,7 @@ export function AdminSettings({
                       }
                       placeholder={t("placeholders.redirectUrl")}
                       required
+                      disabled={oidcReadonly}
                     />
                   </div>
                   <div className="space-y-2">
@@ -818,6 +853,7 @@ export function AdminSettings({
                       }
                       placeholder={t("placeholders.tokenUrl")}
                       required
+                      disabled={oidcReadonly}
                     />
                   </div>
                   <div className="space-y-2">
@@ -835,6 +871,7 @@ export function AdminSettings({
                       }
                       placeholder={t("placeholders.userIdField")}
                       required
+                      disabled={oidcReadonly}
                     />
                   </div>
                   <div className="space-y-2">
@@ -849,6 +886,7 @@ export function AdminSettings({
                       }
                       placeholder={t("placeholders.usernameField")}
                       required
+                      disabled={oidcReadonly}
                     />
                   </div>
                   <div className="space-y-2">
@@ -861,6 +899,7 @@ export function AdminSettings({
                       }
                       placeholder={t("placeholders.scopes")}
                       required
+                      disabled={oidcReadonly}
                     />
                   </div>
                   <div className="space-y-2">
@@ -874,13 +913,14 @@ export function AdminSettings({
                         handleOIDCConfigChange("userinfo_url", e.target.value)
                       }
                       placeholder="https://your-provider.com/application/o/userinfo/"
+                      disabled={oidcReadonly}
                     />
                   </div>
                   <div className="flex gap-2 pt-2">
                     <Button
                       type="submit"
                       className="flex-1"
-                      disabled={oidcLoading}
+                      disabled={oidcLoading || oidcReadonly}
                     >
                       {oidcLoading
                         ? t("admin.saving")
@@ -889,6 +929,7 @@ export function AdminSettings({
                     <Button
                       type="button"
                       variant="outline"
+                      disabled={oidcReadonly}
                       onClick={async () => {
                         if (!allowPasswordLogin) {
                           confirmWithToast(

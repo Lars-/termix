@@ -130,6 +130,54 @@ function isNonEmptyString(val: unknown): val is string {
   return typeof val === "string" && val.trim().length > 0;
 }
 
+// Helper function to get OIDC configuration from environment variables
+function getOIDCConfigFromEnv(): Record<string, string> | null {
+  const clientId = process.env.OIDC_CLIENT_ID;
+  const clientSecret = process.env.OIDC_CLIENT_SECRET;
+  const issuerUrl = process.env.OIDC_ISSUER_URL;
+  const authorizationUrl = process.env.OIDC_AUTHORIZATION_URL;
+  const tokenUrl = process.env.OIDC_TOKEN_URL;
+
+  // If any required field is missing, return null
+  if (!clientId || !clientSecret || !issuerUrl || !authorizationUrl || !tokenUrl) {
+    return null;
+  }
+
+  return {
+    client_id: clientId,
+    client_secret: clientSecret,
+    issuer_url: issuerUrl,
+    authorization_url: authorizationUrl,
+    token_url: tokenUrl,
+    userinfo_url: process.env.OIDC_USERINFO_URL || "",
+    identifier_path: process.env.OIDC_IDENTIFIER_PATH || "sub",
+    name_path: process.env.OIDC_NAME_PATH || "name",
+    scopes: process.env.OIDC_SCOPES || "openid email profile",
+  };
+}
+
+// Helper function to get OIDC configuration (prioritizes environment variables)
+function getOIDCConfig(): Record<string, string> | null {
+  // First, try to get from environment variables
+  const envConfig = getOIDCConfigFromEnv();
+  if (envConfig) {
+    return envConfig;
+  }
+
+  // Fall back to database configuration
+  try {
+    const row = db.$client
+      .prepare("SELECT value FROM settings WHERE key = 'oidc_config'")
+      .get();
+    if (!row) {
+      return null;
+    }
+    return JSON.parse((row as Record<string, unknown>).value as string);
+  } catch (err) {
+    return null;
+  }
+}
+
 const authenticateJWT = authManager.createAuthMiddleware();
 const requireAdmin = authManager.createAdminMiddleware();
 
@@ -254,6 +302,15 @@ router.post("/oidc-config", authenticateJWT, async (req, res) => {
     const user = await db.select().from(users).where(eq(users.id, userId));
     if (!user || user.length === 0 || !user[0].is_admin) {
       return res.status(403).json({ error: "Not authorized" });
+    }
+
+    // Check if OIDC is configured via environment variables
+    const envConfig = getOIDCConfigFromEnv();
+    if (envConfig) {
+      return res.status(403).json({
+        error: "OIDC is configured via environment variables and cannot be modified through the admin panel",
+        code: "OIDC_ENV_READONLY"
+      });
     }
 
     const {
@@ -392,6 +449,15 @@ router.delete("/oidc-config", authenticateJWT, async (req, res) => {
       return res.status(403).json({ error: "Not authorized" });
     }
 
+    // Check if OIDC is configured via environment variables
+    const envConfig = getOIDCConfigFromEnv();
+    if (envConfig) {
+      return res.status(403).json({
+        error: "OIDC is configured via environment variables and cannot be disabled through the admin panel",
+        code: "OIDC_ENV_READONLY"
+      });
+    }
+
     db.$client.prepare("DELETE FROM settings WHERE key = 'oidc_config'").run();
     authLogger.success("OIDC configuration disabled", {
       operation: "oidc_disable",
@@ -408,14 +474,10 @@ router.delete("/oidc-config", authenticateJWT, async (req, res) => {
 // GET /users/oidc-config
 router.get("/oidc-config", async (req, res) => {
   try {
-    const row = db.$client
-      .prepare("SELECT value FROM settings WHERE key = 'oidc_config'")
-      .get();
-    if (!row) {
+    const config = getOIDCConfig();
+    if (!config) {
       return res.json(null);
     }
-
-    const config = JSON.parse((row as Record<string, unknown>).value as string);
 
     const publicConfig = {
       client_id: config.client_id,
@@ -436,6 +498,18 @@ router.get("/oidc-config", async (req, res) => {
 router.get("/oidc-config/admin", requireAdmin, async (req, res) => {
   const userId = (req as AuthenticatedRequest).userId;
   try {
+    // Check if configuration is coming from environment variables
+    const envConfig = getOIDCConfigFromEnv();
+    if (envConfig) {
+      // Return env config with a flag indicating it's from environment
+      return res.json({
+        ...envConfig,
+        _source: "environment",
+        _readonly: true,
+      });
+    }
+
+    // Fall back to database configuration
     const row = db.$client
       .prepare("SELECT value FROM settings WHERE key = 'oidc_config'")
       .get();
@@ -481,7 +555,11 @@ router.get("/oidc-config/admin", requireAdmin, async (req, res) => {
       }
     }
 
-    res.json(config);
+    res.json({
+      ...config,
+      _source: "database",
+      _readonly: false,
+    });
   } catch (err) {
     authLogger.error("Failed to get OIDC config for admin", err);
     res.status(500).json({ error: "Failed to get OIDC config for admin" });
@@ -492,14 +570,10 @@ router.get("/oidc-config/admin", requireAdmin, async (req, res) => {
 // GET /users/oidc/authorize
 router.get("/oidc/authorize", async (req, res) => {
   try {
-    const row = db.$client
-      .prepare("SELECT value FROM settings WHERE key = 'oidc_config'")
-      .get();
-    if (!row) {
+    const config = getOIDCConfig();
+    if (!config) {
       return res.status(404).json({ error: "OIDC not configured" });
     }
-
-    const config = JSON.parse((row as Record<string, unknown>).value as string);
     const state = nanoid();
     const nonce = nanoid();
 
@@ -572,16 +646,10 @@ router.get("/oidc/callback", async (req, res) => {
       .prepare("DELETE FROM settings WHERE key = ?")
       .run(`oidc_redirect_${state}`);
 
-    const configRow = db.$client
-      .prepare("SELECT value FROM settings WHERE key = 'oidc_config'")
-      .get();
-    if (!configRow) {
+    const config = getOIDCConfig();
+    if (!config) {
       return res.status(500).json({ error: "OIDC not configured" });
     }
-
-    const config = JSON.parse(
-      (configRow as Record<string, unknown>).value as string,
-    );
 
     const tokenResponse = await fetch(config.token_url, {
       method: "POST",
