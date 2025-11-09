@@ -22,6 +22,7 @@ import {
   updateSSHHost,
   renameFolder,
   exportSSHHostWithCredentials,
+  getUserInfo,
 } from "@/ui/main-axios.ts";
 import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
@@ -45,12 +46,15 @@ import {
   Copy,
   Activity,
   Clock,
+  Share2,
 } from "lucide-react";
 import type {
   SSHHost,
   SSHManagerHostViewerProps,
 } from "../../../../types/index.js";
 import { DEFAULT_STATS_CONFIG } from "@/types/stats-widgets";
+import { ShareHostDialog } from "./ShareHostDialog";
+import { ShareFolderDialog } from "./ShareFolderDialog";
 
 export function HostManagerViewer({ onEditHost }: SSHManagerHostViewerProps) {
   const { t } = useTranslation();
@@ -66,6 +70,14 @@ export function HostManagerViewer({ onEditHost }: SSHManagerHostViewerProps) {
   const [editingFolderName, setEditingFolderName] = useState("");
   const [operationLoading, setOperationLoading] = useState(false);
   const dragCounter = useRef(0);
+
+  // User info and sharing state
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [userId, setUserId] = useState<string | null>(null);
+  const [shareHostDialogOpen, setShareHostDialogOpen] = useState(false);
+  const [hostToShare, setHostToShare] = useState<SSHHost | null>(null);
+  const [shareFolderDialogOpen, setShareFolderDialogOpen] = useState(false);
+  const [folderToShare, setFolderToShare] = useState<{ name: string; ownerId: string } | null>(null);
 
   useEffect(() => {
     fetchHosts();
@@ -83,6 +95,18 @@ export function HostManagerViewer({ onEditHost }: SSHManagerHostViewerProps) {
       window.removeEventListener("ssh-hosts:changed", handleHostsRefresh);
       window.removeEventListener("folders:changed", handleHostsRefresh);
     };
+  }, []);
+
+  // Fetch user info to check if admin
+  useEffect(() => {
+    getUserInfo()
+      .then((userInfo) => {
+        setIsAdmin(!!userInfo.is_admin);
+        setUserId(userInfo.userId);
+      })
+      .catch((error) => {
+        console.error("Failed to fetch user info:", error);
+      });
   }, []);
 
   const fetchHosts = async () => {
@@ -917,18 +941,35 @@ export function HostManagerViewer({ onEditHost }: SSHManagerHostViewerProps) {
                             {folder}
                           </span>
                           {folder !== t("hosts.uncategorized") && (
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                startFolderEdit(folder);
-                              }}
-                              className="h-4 w-4 p-0 opacity-50 hover:opacity-100 transition-opacity"
-                              title="Rename folder"
-                            >
-                              <Pencil className="h-3 w-3" />
-                            </Button>
+                            <>
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  startFolderEdit(folder);
+                                }}
+                                className="h-4 w-4 p-0 opacity-50 hover:opacity-100 transition-opacity"
+                                title="Rename folder"
+                              >
+                                <Pencil className="h-3 w-3" />
+                              </Button>
+                              {isAdmin && userId && (
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setFolderToShare({ name: folder, ownerId: userId });
+                                    setShareFolderDialogOpen(true);
+                                  }}
+                                  className="h-4 w-4 p-0 opacity-50 hover:opacity-100 transition-opacity text-purple-500"
+                                  title="Share folder"
+                                >
+                                  <Share2 className="h-3 w-3" />
+                                </Button>
+                              )}
+                            </>
                           )}
                         </>
                       )}
@@ -956,7 +997,7 @@ export function HostManagerViewer({ onEditHost }: SSHManagerHostViewerProps) {
                               >
                                 <div className="flex items-start justify-between">
                                   <div className="flex-1 min-w-0">
-                                    <div className="flex items-center gap-1">
+                                    <div className="flex items-center gap-1 flex-wrap">
                                       {host.pin && (
                                         <Pin className="h-3 w-3 text-yellow-500 flex-shrink-0" />
                                       )}
@@ -964,6 +1005,12 @@ export function HostManagerViewer({ onEditHost }: SSHManagerHostViewerProps) {
                                         {host.name ||
                                           `${host.username}@${host.ip}`}
                                       </h3>
+                                      {host.isShared && (
+                                        <Badge variant="secondary" className="text-xs h-4 px-1 py-0 flex items-center gap-0.5">
+                                          <Share2 className="h-2 w-2" />
+                                          Shared
+                                        </Badge>
+                                      )}
                                     </div>
                                     <p className="text-xs text-muted-foreground truncate">
                                       {host.ip}:{host.port}
@@ -1072,6 +1119,27 @@ export function HostManagerViewer({ onEditHost }: SSHManagerHostViewerProps) {
                                         <p>Clone host</p>
                                       </TooltipContent>
                                     </Tooltip>
+                                    {isAdmin && !host.isShared && (
+                                      <Tooltip>
+                                        <TooltipTrigger asChild>
+                                          <Button
+                                            size="sm"
+                                            variant="ghost"
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              setHostToShare(host);
+                                              setShareHostDialogOpen(true);
+                                            }}
+                                            className="h-5 w-5 p-0 text-purple-500 hover:text-purple-700 hover:bg-purple-500/10"
+                                          >
+                                            <Share2 className="h-3 w-3" />
+                                          </Button>
+                                        </TooltipTrigger>
+                                        <TooltipContent>
+                                          <p>Share host</p>
+                                        </TooltipContent>
+                                      </Tooltip>
+                                    )}
                                   </div>
                                 </div>
 
@@ -1202,6 +1270,33 @@ export function HostManagerViewer({ onEditHost }: SSHManagerHostViewerProps) {
           ))}
         </div>
       </ScrollArea>
+
+      {/* Share dialogs */}
+      {hostToShare && (
+        <ShareHostDialog
+          isOpen={shareHostDialogOpen}
+          onClose={() => {
+            setShareHostDialogOpen(false);
+            setHostToShare(null);
+            fetchHosts(); // Refresh to update share indicators
+          }}
+          hostId={hostToShare.id}
+          hostName={hostToShare.name || `${hostToShare.username}@${hostToShare.ip}`}
+        />
+      )}
+
+      {folderToShare && (
+        <ShareFolderDialog
+          isOpen={shareFolderDialogOpen}
+          onClose={() => {
+            setShareFolderDialogOpen(false);
+            setFolderToShare(null);
+            fetchHosts(); // Refresh to update share indicators
+          }}
+          folderName={folderToShare.name}
+          ownerId={folderToShare.ownerId}
+        />
+      )}
     </div>
   );
 }
