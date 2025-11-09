@@ -66,7 +66,7 @@ import {
 } from "@/constants/terminal-themes";
 import { TerminalPreview } from "@/ui/desktop/apps/terminal/TerminalPreview.tsx";
 import type { TerminalConfig } from "@/types";
-import { Plus, X } from "lucide-react";
+import { Plus, X, Info } from "lucide-react";
 
 interface SSHHost {
   id: number;
@@ -111,6 +111,10 @@ export function HostManagerEditor({
   onFormSubmit,
 }: SSHManagerHostEditorProps) {
   const { t } = useTranslation();
+
+  // Check if host is shared and read-only
+  const isReadOnly = editingHost && (editingHost as any).isShared && !(editingHost as any).isOwner;
+
   const [folders, setFolders] = useState<string[]>([]);
   const [sshConfigurations, setSshConfigurations] = useState<string[]>([]);
   const [credentials, setCredentials] = useState<
@@ -817,11 +821,20 @@ export function HostManagerEditor({
     <div className="flex-1 flex flex-col h-full min-h-0 w-full">
       <Form {...form}>
         <form
-          onSubmit={form.handleSubmit(onSubmit)}
+          onSubmit={isReadOnly ? (e) => e.preventDefault() : form.handleSubmit(onSubmit)}
           className="flex flex-col flex-1 min-h-0 h-full"
         >
+          <fieldset disabled={isReadOnly} className="flex flex-col flex-1 min-h-0 h-full border-none p-0 m-0">
           <ScrollArea className="flex-1 min-h-0 w-full my-1 pb-2">
             <div className="pr-4">
+              {isReadOnly && (
+                <Alert className="mb-4">
+                  <Info className="h-4 w-4" />
+                  <AlertDescription>
+                    This host is shared with you (read-only). You can view and use it, but cannot make changes. Contact the owner to request modifications.
+                  </AlertDescription>
+                </Alert>
+              )}
               <Tabs defaultValue="general" className="w-full">
                 <TabsList>
                   <TabsTrigger value="general">
@@ -2659,16 +2672,19 @@ export function HostManagerEditor({
               </Tabs>
             </div>
           </ScrollArea>
-          <footer className="shrink-0 w-full pb-0">
-            <Separator className="p-0.25" />
-            <Button className="translate-y-2" type="submit" variant="outline">
-              {editingHost
-                ? editingHost.id
-                  ? t("hosts.updateHost")
-                  : t("hosts.cloneHost")
-                : t("hosts.addHost")}
-            </Button>
-          </footer>
+          {!isReadOnly && (
+            <footer className="shrink-0 w-full pb-0">
+              <Separator className="p-0.25" />
+              <Button className="translate-y-2" type="submit" variant="outline">
+                {editingHost
+                  ? editingHost.id
+                    ? t("hosts.updateHost")
+                    : t("hosts.cloneHost")
+                  : t("hosts.addHost")}
+              </Button>
+            </footer>
+          )}
+          </fieldset>
         </form>
       </Form>
     </div>
