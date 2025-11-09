@@ -2626,3 +2626,135 @@ export async function resetRecentActivity(): Promise<{ message: string }> {
     throw handleApiError(error, "reset recent activity");
   }
 }
+
+// ============================================================================
+// HOST AND FOLDER SHARING
+// ============================================================================
+
+export interface HostShare {
+  id: number;
+  hostId: number;
+  ownerId: string;
+  sharedWithUserId: string;
+  sharedWithUsername?: string;
+  accessLevel: string;
+  createdAt: string;
+}
+
+export interface FolderShare {
+  id: number;
+  folderName: string;
+  ownerId: string;
+  sharedWithUserId: string;
+  sharedWithUsername?: string;
+  accessLevel: string;
+  createdAt: string;
+}
+
+export interface MyShares {
+  hostShares: Array<{
+    id: number;
+    hostId: number;
+    hostName: string;
+    hostIp: string;
+    folder: string;
+    ownerId: string;
+    ownerUsername: string;
+    accessLevel: string;
+    createdAt: string;
+  }>;
+  folderShares: Array<{
+    id: number;
+    folderName: string;
+    ownerId: string;
+    ownerUsername: string;
+    accessLevel: string;
+    createdAt: string;
+  }>;
+}
+
+export async function shareHost(
+  hostId: number,
+  sharedWithUserId: string,
+): Promise<HostShare> {
+  try {
+    const response = await sshHostApi.post("/shares/host", {
+      hostId,
+      sharedWithUserId,
+    });
+    return response.data;
+  } catch (error) {
+    throw handleApiError(error, "share host");
+  }
+}
+
+export async function shareFolder(
+  folderName: string,
+  ownerId: string,
+  sharedWithUserId: string,
+): Promise<FolderShare> {
+  try {
+    const response = await sshHostApi.post("/shares/folder", {
+      folderName,
+      ownerId,
+      sharedWithUserId,
+    });
+    return response.data;
+  } catch (error) {
+    throw handleApiError(error, "share folder");
+  }
+}
+
+export async function getHostShares(hostId: number): Promise<HostShare[]> {
+  try {
+    const response = await sshHostApi.get(`/shares/host/${hostId}`);
+    return response.data;
+  } catch (error) {
+    throw handleApiError(error, "get host shares");
+  }
+}
+
+export async function getFolderShares(
+  ownerId: string,
+  folderName: string,
+): Promise<FolderShare[]> {
+  try {
+    const response = await sshHostApi.get(
+      `/shares/folder/${ownerId}/${encodeURIComponent(folderName)}`,
+    );
+    return response.data;
+  } catch (error) {
+    throw handleApiError(error, "get folder shares");
+  }
+}
+
+export async function getMyShares(): Promise<MyShares> {
+  try {
+    const response = await sshHostApi.get("/shares/my");
+    return response.data;
+  } catch (error) {
+    throw handleApiError(error, "get my shares");
+  }
+}
+
+export async function revokeHostShare(
+  shareId: number,
+): Promise<{ message: string }> {
+  try {
+    const response = await sshHostApi.delete(`/shares/host/${shareId}`);
+    return response.data;
+  } catch (error) {
+    throw handleApiError(error, "revoke host share");
+  }
+}
+
+export async function revokeFolderShare(
+  shareId: number,
+): Promise<{ message: string }> {
+  try {
+    const response = await sshHostApi.delete(`/shares/folder/${shareId}`);
+    return response.data;
+  } catch (error) {
+    throw handleApiError(error, "revoke folder share");
+  }
+}

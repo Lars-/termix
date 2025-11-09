@@ -223,3 +223,41 @@ export const recentActivity = sqliteTable("recent_activity", {
     .notNull()
     .default(sql`CURRENT_TIMESTAMP`),
 });
+
+export const hostShares = sqliteTable("host_shares", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  hostId: integer("host_id")
+    .notNull()
+    .references(() => sshData.id, { onDelete: "cascade" }),
+  ownerId: text("owner_id")
+    .notNull()
+    .references(() => users.id),
+  sharedWithUserId: text("shared_with_user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  accessLevel: text("access_level").notNull().default("viewer"), // viewer = read-only
+  createdAt: text("created_at")
+    .notNull()
+    .default(sql`CURRENT_TIMESTAMP`),
+  createdBy: text("created_by")
+    .notNull()
+    .references(() => users.id),
+});
+
+export const folderShares = sqliteTable("folder_shares", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  folderName: text("folder_name").notNull(),
+  ownerId: text("owner_id")
+    .notNull()
+    .references(() => users.id),
+  sharedWithUserId: text("shared_with_user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  accessLevel: text("access_level").notNull().default("viewer"), // viewer = read-only
+  createdAt: text("created_at")
+    .notNull()
+    .default(sql`CURRENT_TIMESTAMP`),
+  createdBy: text("created_by")
+    .notNull()
+    .references(() => users.id),
+});
