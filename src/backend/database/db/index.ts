@@ -285,6 +285,33 @@ async function initializeCompleteDatabase(): Promise<void> {
         FOREIGN KEY (host_id) REFERENCES ssh_data (id)
     );
 
+    CREATE TABLE IF NOT EXISTS host_shares (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        host_id INTEGER NOT NULL,
+        owner_id TEXT NOT NULL,
+        shared_with_user_id TEXT NOT NULL,
+        access_level TEXT NOT NULL DEFAULT 'viewer',
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        created_by TEXT NOT NULL,
+        FOREIGN KEY (host_id) REFERENCES ssh_data (id) ON DELETE CASCADE,
+        FOREIGN KEY (owner_id) REFERENCES users (id),
+        FOREIGN KEY (shared_with_user_id) REFERENCES users (id) ON DELETE CASCADE,
+        FOREIGN KEY (created_by) REFERENCES users (id)
+    );
+
+    CREATE TABLE IF NOT EXISTS folder_shares (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        folder_name TEXT NOT NULL,
+        owner_id TEXT NOT NULL,
+        shared_with_user_id TEXT NOT NULL,
+        access_level TEXT NOT NULL DEFAULT 'viewer',
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        created_by TEXT NOT NULL,
+        FOREIGN KEY (owner_id) REFERENCES users (id),
+        FOREIGN KEY (shared_with_user_id) REFERENCES users (id) ON DELETE CASCADE,
+        FOREIGN KEY (created_by) REFERENCES users (id)
+    );
+
 `);
 
   try {

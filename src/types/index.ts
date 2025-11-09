@@ -36,6 +36,12 @@ export interface SSHHost {
   terminalConfig?: TerminalConfig;
   createdAt: string;
   updatedAt: string;
+
+  // Sharing metadata
+  isShared?: boolean;
+  isOwner?: boolean;
+  shareId?: number;
+  actualOwnerId?: string;
 }
 
 export interface SSHHostData {

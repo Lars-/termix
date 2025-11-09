@@ -8,6 +8,9 @@ import {
   fileManagerRecent,
   fileManagerPinned,
   fileManagerShortcuts,
+  hostShares,
+  folderShares,
+  users,
 } from "../db/schema.js";
 import { eq, and, desc, isNotNull, or } from "drizzle-orm";
 import type { Request, Response } from "express";
@@ -34,6 +37,7 @@ function isValidPort(port: unknown): port is number {
 const authManager = AuthManager.getInstance();
 const authenticateJWT = authManager.createAuthMiddleware();
 const requireDataAccess = authManager.createDataAccessMiddleware();
+const requireAdmin = authManager.createAdminMiddleware();
 
 router.get("/db/host/internal", async (req: Request, res: Response) => {
   try {
@@ -445,6 +449,24 @@ router.put(
       return res.status(400).json({ error: "Invalid SSH data" });
     }
 
+    // Check if user owns this host (prevent editing shared hosts)
+    const existingHost = await db
+      .select()
+      .from(sshData)
+      .where(and(eq(sshData.id, Number(hostId)), eq(sshData.userId, userId)))
+      .limit(1);
+
+    if (existingHost.length === 0) {
+      sshLogger.warn("Cannot update host - user does not own this host", {
+        operation: "host_update",
+        hostId: parseInt(hostId),
+        userId,
+      });
+      return res.status(403).json({
+        error: "Cannot edit this host. You can only edit hosts that you own."
+      });
+    }
+
     const effectiveAuthType = authType || authMethod;
     const sshDataObj: Record<string, unknown> = {
       name,
@@ -586,16 +608,59 @@ router.get("/db/host", authenticateJWT, async (req: Request, res: Response) => {
     return res.status(400).json({ error: "Invalid userId" });
   }
   try {
-    const data = await SimpleDBOps.select(
+    // Get user's own hosts
+    const ownHosts = await SimpleDBOps.select(
       db.select().from(sshData).where(eq(sshData.userId, userId)),
       "ssh_data",
       userId,
     );
 
-    const result = await Promise.all(
-      data.map(async (row: Record<string, unknown>) => {
+    // Get hosts shared with the user via direct host shares
+    const sharedHostsViaHost = await db
+      .select({
+        host: sshData,
+        shareId: hostShares.id,
+        ownerId: hostShares.ownerId,
+      })
+      .from(hostShares)
+      .innerJoin(sshData, eq(hostShares.hostId, sshData.id))
+      .where(eq(hostShares.sharedWithUserId, userId));
+
+    // Get hosts shared with the user via folder shares
+    const sharedFolders = await db
+      .select()
+      .from(folderShares)
+      .where(eq(folderShares.sharedWithUserId, userId));
+
+    // Get hosts from shared folders
+    const sharedHostsViaFolder: Array<{ host: typeof sshData.$inferSelect; shareId: number; ownerId: string }> = [];
+    for (const folderShare of sharedFolders) {
+      const folderHosts = await db
+        .select()
+        .from(sshData)
+        .where(
+          and(
+            eq(sshData.userId, folderShare.ownerId),
+            eq(sshData.folder, folderShare.folderName),
+          ),
+        );
+
+      for (const host of folderHosts) {
+        sharedHostsViaFolder.push({
+          host,
+          shareId: folderShare.id,
+          ownerId: folderShare.ownerId,
+        });
+      }
+    }
+
+    // Process own hosts
+    const processedOwnHosts = await Promise.all(
+      ownHosts.map(async (row: Record<string, unknown>) => {
         const baseHost = {
           ...row,
+          isShared: false,
+          isOwner: true,
           tags:
             typeof row.tags === "string"
               ? row.tags
@@ -622,7 +687,91 @@ router.get("/db/host", authenticateJWT, async (req: Request, res: Response) => {
       }),
     );
 
-    res.json(result);
+    // Process shared hosts (via direct host shares)
+    const processedSharedHostsViaHost = await Promise.all(
+      sharedHostsViaHost.map(async (share) => {
+        const row = share.host as unknown as Record<string, unknown>;
+        const baseHost = {
+          ...row,
+          isShared: true,
+          isOwner: false,
+          shareId: share.shareId,
+          actualOwnerId: share.ownerId,
+          tags:
+            typeof row.tags === "string"
+              ? row.tags
+                ? (row.tags as string).split(",").filter(Boolean)
+                : []
+              : [],
+          pin: !!row.pin,
+          enableTerminal: !!row.enableTerminal,
+          enableTunnel: !!row.enableTunnel,
+          tunnelConnections: row.tunnelConnections
+            ? JSON.parse(row.tunnelConnections as string)
+            : [],
+          enableFileManager: !!row.enableFileManager,
+          statsConfig: row.statsConfig
+            ? JSON.parse(row.statsConfig as string)
+            : undefined,
+          terminalConfig: row.terminalConfig
+            ? JSON.parse(row.terminalConfig as string)
+            : undefined,
+          forceKeyboardInteractive: row.forceKeyboardInteractive === "true",
+        };
+
+        return (await resolveHostCredentials(baseHost)) || baseHost;
+      }),
+    );
+
+    // Process shared hosts (via folder shares)
+    const processedSharedHostsViaFolder = await Promise.all(
+      sharedHostsViaFolder.map(async (share) => {
+        const row = share.host as unknown as Record<string, unknown>;
+        const baseHost = {
+          ...row,
+          isShared: true,
+          isOwner: false,
+          shareId: share.shareId,
+          actualOwnerId: share.ownerId,
+          tags:
+            typeof row.tags === "string"
+              ? row.tags
+                ? (row.tags as string).split(",").filter(Boolean)
+                : []
+              : [],
+          pin: !!row.pin,
+          enableTerminal: !!row.enableTerminal,
+          enableTunnel: !!row.enableTunnel,
+          tunnelConnections: row.tunnelConnections
+            ? JSON.parse(row.tunnelConnections as string)
+            : [],
+          enableFileManager: !!row.enableFileManager,
+          statsConfig: row.statsConfig
+            ? JSON.parse(row.statsConfig as string)
+            : undefined,
+          terminalConfig: row.terminalConfig
+            ? JSON.parse(row.terminalConfig as string)
+            : undefined,
+          forceKeyboardInteractive: row.forceKeyboardInteractive === "true",
+        };
+
+        return (await resolveHostCredentials(baseHost)) || baseHost;
+      }),
+    );
+
+    // Combine all hosts and remove duplicates (in case host is shared both directly and via folder)
+    const allHosts = [
+      ...processedOwnHosts,
+      ...processedSharedHostsViaHost,
+      ...processedSharedHostsViaFolder,
+    ];
+
+    // Remove duplicates by host ID
+    const uniqueHosts = allHosts.filter(
+      (host, index, self) => index === self.findIndex((h) => h.id === host.id),
+    );
+
+    res.json(uniqueHosts);
   } catch (err) {
     sshLogger.error("Failed to fetch SSH hosts from database", err, {
       operation: "host_fetch",
@@ -650,13 +799,68 @@ router.get(
       return res.status(400).json({ error: "Invalid userId or hostId" });
     }
     try {
-      const data = await db
+      // First, try to get the host if user owns it
+      const ownHostData = await db
         .select()
         .from(sshData)
         .where(and(eq(sshData.id, Number(hostId)), eq(sshData.userId, userId)));
 
-      if (data.length === 0) {
-        sshLogger.warn("SSH host not found", {
+      let host;
+      let isShared = false;
+      let isOwner = false;
+
+      if (ownHostData.length > 0) {
+        // User owns this host
+        host = ownHostData[0];
+        isOwner = true;
+      } else {
+        // Check if host is shared with user via direct host share
+        const sharedHostData = await db
+          .select({ host: sshData })
+          .from(hostShares)
+          .innerJoin(sshData, eq(hostShares.hostId, sshData.id))
+          .where(
+            and(
+              eq(hostShares.hostId, Number(hostId)),
+              eq(hostShares.sharedWithUserId, userId),
+            ),
+          )
+          .limit(1);
+
+        if (sharedHostData.length > 0) {
+          host = sharedHostData[0].host;
+          isShared = true;
+        } else {
+          // Check if host is in a folder shared with user
+          const hostData = await db
+            .select()
+            .from(sshData)
+            .where(eq(sshData.id, Number(hostId)))
+            .limit(1);
+
+          if (hostData.length > 0) {
+            const folderShareData = await db
+              .select()
+              .from(folderShares)
+              .where(
+                and(
+                  eq(folderShares.ownerId, hostData[0].userId),
+                  eq(folderShares.folderName, hostData[0].folder || ""),
+                  eq(folderShares.sharedWithUserId, userId),
+                ),
+              )
+              .limit(1);
+
+            if (folderShareData.length > 0) {
+              host = hostData[0];
+              isShared = true;
+            }
+          }
+        }
+      }
+
+      if (!host) {
+        sshLogger.warn("SSH host not found or access denied", {
           operation: "host_fetch_by_id",
           hostId: parseInt(hostId),
           userId,
@@ -664,9 +868,10 @@ router.get(
         return res.status(404).json({ error: "SSH host not found" });
       }
 
-      const host = data[0];
       const result = {
         ...host,
+        isShared,
+        isOwner,
         tags:
           typeof host.tags === "string"
             ? host.tags
@@ -802,12 +1007,14 @@ router.delete(
         .where(and(eq(sshData.id, Number(hostId)), eq(sshData.userId, userId)));
 
       if (hostToDelete.length === 0) {
-        sshLogger.warn("SSH host not found for deletion", {
+        sshLogger.warn("SSH host not found for deletion or user does not own it", {
           operation: "host_delete",
           hostId: parseInt(hostId),
           userId,
         });
-        return res.status(404).json({ error: "SSH host not found" });
+        return res.status(403).json({
+          error: "Cannot delete this host. You can only delete hosts that you own."
+        });
       }
 
       const numericHostId = Number(hostId);
@@ -1726,6 +1933,403 @@ router.get(
     } catch (error) {
       sshLogger.error("Error getting autostart status", error, {
         operation: "autostart_status_error",
+        userId,
+      });
+      res.status(500).json({ error: "Internal server error" });
+    }
+  },
+);
+
+// ============================================================================
+// SHARING ENDPOINTS
+// ============================================================================
+
+// Route: Share a host with another user (admin only)
+// POST /ssh/shares/host
+router.post(
+  "/shares/host",
+  requireAdmin,
+  async (req: Request, res: Response) => {
+    const userId = (req as AuthenticatedRequest).userId;
+
+    try {
+      const { hostId, sharedWithUserId } = req.body;
+
+      if (!hostId || !sharedWithUserId) {
+        return res.status(400).json({ error: "Missing required fields" });
+      }
+
+      // Verify the host exists and get its owner
+      const host = await db
+        .select()
+        .from(sshData)
+        .where(eq(sshData.id, Number(hostId)))
+        .limit(1);
+
+      if (host.length === 0) {
+        return res.status(404).json({ error: "Host not found" });
+      }
+
+      // Verify the target user exists
+      const targetUser = await db
+        .select()
+        .from(users)
+        .where(eq(users.id, sharedWithUserId))
+        .limit(1);
+
+      if (targetUser.length === 0) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      // Check if already shared
+      const existingShare = await db
+        .select()
+        .from(hostShares)
+        .where(
+          and(
+            eq(hostShares.hostId, Number(hostId)),
+            eq(hostShares.sharedWithUserId, sharedWithUserId),
+          ),
+        )
+        .limit(1);
+
+      if (existingShare.length > 0) {
+        return res.status(400).json({ error: "Host already shared with this user" });
+      }
+
+      // Create the share
+      const shareResult = await db
+        .insert(hostShares)
+        .values({
+          hostId: Number(hostId),
+          ownerId: host[0].userId,
+          sharedWithUserId,
+          accessLevel: "viewer",
+          createdBy: userId,
+        })
+        .returning();
+
+      DatabaseSaveTrigger.trigger();
+
+      sshLogger.info("Host shared with user", {
+        operation: "host_share_created",
+        hostId,
+        ownerId: host[0].userId,
+        sharedWithUserId,
+        createdBy: userId,
+      });
+
+      res.json(shareResult[0]);
+    } catch (error) {
+      sshLogger.error("Error sharing host", error, {
+        operation: "host_share_error",
+        userId,
+      });
+      res.status(500).json({ error: "Internal server error" });
+    }
+  },
+);
+
+// Route: Share a folder with another user (admin only)
+// POST /ssh/shares/folder
+router.post(
+  "/shares/folder",
+  requireAdmin,
+  async (req: Request, res: Response) => {
+    const userId = (req as AuthenticatedRequest).userId;
+
+    try {
+      const { folderName, ownerId, sharedWithUserId } = req.body;
+
+      if (!folderName || !ownerId || !sharedWithUserId) {
+        return res.status(400).json({ error: "Missing required fields" });
+      }
+
+      // Verify the owner exists
+      const owner = await db
+        .select()
+        .from(users)
+        .where(eq(users.id, ownerId))
+        .limit(1);
+
+      if (owner.length === 0) {
+        return res.status(404).json({ error: "Owner not found" });
+      }
+
+      // Verify the target user exists
+      const targetUser = await db
+        .select()
+        .from(users)
+        .where(eq(users.id, sharedWithUserId))
+        .limit(1);
+
+      if (targetUser.length === 0) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      // Verify the folder exists for this owner
+      const folderHosts = await db
+        .select()
+        .from(sshData)
+        .where(
+          and(
+            eq(sshData.userId, ownerId),
+            eq(sshData.folder, folderName),
+          ),
+        )
+        .limit(1);
+
+      if (folderHosts.length === 0) {
+        return res.status(404).json({ error: "Folder not found for this owner" });
+      }
+
+      // Check if already shared
+      const existingShare = await db
+        .select()
+        .from(folderShares)
+        .where(
+          and(
+            eq(folderShares.folderName, folderName),
+            eq(folderShares.ownerId, ownerId),
+            eq(folderShares.sharedWithUserId, sharedWithUserId),
+          ),
+        )
+        .limit(1);
+
+      if (existingShare.length > 0) {
+        return res.status(400).json({ error: "Folder already shared with this user" });
+      }
+
+      // Create the share
+      const shareResult = await db
+        .insert(folderShares)
+        .values({
+          folderName,
+          ownerId,
+          sharedWithUserId,
+          accessLevel: "viewer",
+          createdBy: userId,
+        })
+        .returning();
+
+      DatabaseSaveTrigger.trigger();
+
+      sshLogger.info("Folder shared with user", {
+        operation: "folder_share_created",
+        folderName,
+        ownerId,
+        sharedWithUserId,
+        createdBy: userId,
+      });
+
+      res.json(shareResult[0]);
+    } catch (error) {
+      sshLogger.error("Error sharing folder", error, {
+        operation: "folder_share_error",
+        userId,
+      });
+      res.status(500).json({ error: "Internal server error" });
+    }
+  },
+);
+
+// Route: Get all shares for a specific host (admin only)
+// GET /ssh/shares/host/:hostId
+router.get(
+  "/shares/host/:hostId",
+  requireAdmin,
+  async (req: Request, res: Response) => {
+    try {
+      const { hostId } = req.params;
+
+      const shares = await db
+        .select({
+          id: hostShares.id,
+          hostId: hostShares.hostId,
+          ownerId: hostShares.ownerId,
+          sharedWithUserId: hostShares.sharedWithUserId,
+          sharedWithUsername: users.username,
+          accessLevel: hostShares.accessLevel,
+          createdAt: hostShares.createdAt,
+        })
+        .from(hostShares)
+        .leftJoin(users, eq(hostShares.sharedWithUserId, users.id))
+        .where(eq(hostShares.hostId, Number(hostId)));
+
+      res.json(shares);
+    } catch (error) {
+      sshLogger.error("Error getting host shares", error, {
+        operation: "host_shares_get_error",
+      });
+      res.status(500).json({ error: "Internal server error" });
+    }
+  },
+);
+
+// Route: Get all shares for a specific folder (admin only)
+// GET /ssh/shares/folder/:ownerId/:folderName
+router.get(
+  "/shares/folder/:ownerId/:folderName",
+  requireAdmin,
+  async (req: Request, res: Response) => {
+    try {
+      const { ownerId, folderName } = req.params;
+
+      const shares = await db
+        .select({
+          id: folderShares.id,
+          folderName: folderShares.folderName,
+          ownerId: folderShares.ownerId,
+          sharedWithUserId: folderShares.sharedWithUserId,
+          sharedWithUsername: users.username,
+          accessLevel: folderShares.accessLevel,
+          createdAt: folderShares.createdAt,
+        })
+        .from(folderShares)
+        .leftJoin(users, eq(folderShares.sharedWithUserId, users.id))
+        .where(
+          and(
+            eq(folderShares.ownerId, ownerId),
+            eq(folderShares.folderName, decodeURIComponent(folderName)),
+          ),
+        );
+
+      res.json(shares);
+    } catch (error) {
+      sshLogger.error("Error getting folder shares", error, {
+        operation: "folder_shares_get_error",
+      });
+      res.status(500).json({ error: "Internal server error" });
+    }
+  },
+);
+
+// Route: Get all shares created by or shared with the current user
+// GET /ssh/shares/my
+router.get(
+  "/shares/my",
+  authenticateJWT,
+  async (req: Request, res: Response) => {
+    const userId = (req as AuthenticatedRequest).userId;
+
+    try {
+      // Get host shares where user is the recipient
+      const myHostShares = await db
+        .select({
+          id: hostShares.id,
+          hostId: hostShares.hostId,
+          hostName: sshData.name,
+          hostIp: sshData.ip,
+          folder: sshData.folder,
+          ownerId: hostShares.ownerId,
+          ownerUsername: users.username,
+          accessLevel: hostShares.accessLevel,
+          createdAt: hostShares.createdAt,
+        })
+        .from(hostShares)
+        .leftJoin(sshData, eq(hostShares.hostId, sshData.id))
+        .leftJoin(users, eq(hostShares.ownerId, users.id))
+        .where(eq(hostShares.sharedWithUserId, userId));
+
+      // Get folder shares where user is the recipient
+      const myFolderShares = await db
+        .select({
+          id: folderShares.id,
+          folderName: folderShares.folderName,
+          ownerId: folderShares.ownerId,
+          ownerUsername: users.username,
+          accessLevel: folderShares.accessLevel,
+          createdAt: folderShares.createdAt,
+        })
+        .from(folderShares)
+        .leftJoin(users, eq(folderShares.ownerId, users.id))
+        .where(eq(folderShares.sharedWithUserId, userId));
+
+      res.json({
+        hostShares: myHostShares,
+        folderShares: myFolderShares,
+      });
+    } catch (error) {
+      sshLogger.error("Error getting user shares", error, {
+        operation: "user_shares_get_error",
+        userId,
+      });
+      res.status(500).json({ error: "Internal server error" });
+    }
+  },
+);
+
+// Route: Revoke a host share (admin only)
+// DELETE /ssh/shares/host/:shareId
+router.delete(
+  "/shares/host/:shareId",
+  requireAdmin,
+  async (req: Request, res: Response) => {
+    const userId = (req as AuthenticatedRequest).userId;
+
+    try {
+      const { shareId } = req.params;
+
+      const deletedShare = await db
+        .delete(hostShares)
+        .where(eq(hostShares.id, Number(shareId)))
+        .returning();
+
+      if (deletedShare.length === 0) {
+        return res.status(404).json({ error: "Share not found" });
+      }
+
+      DatabaseSaveTrigger.trigger();
+
+      sshLogger.info("Host share revoked", {
+        operation: "host_share_revoked",
+        shareId,
+        revokedBy: userId,
+      });
+
+      res.json({ message: "Share revoked successfully" });
+    } catch (error) {
+      sshLogger.error("Error revoking host share", error, {
+        operation: "host_share_revoke_error",
+        userId,
+      });
+      res.status(500).json({ error: "Internal server error" });
+    }
+  },
+);
+
+// Route: Revoke a folder share (admin only)
+// DELETE /ssh/shares/folder/:shareId
+router.delete(
+  "/shares/folder/:shareId",
+  requireAdmin,
+  async (req: Request, res: Response) => {
+    const userId = (req as AuthenticatedRequest).userId;
+
+    try {
+      const { shareId } = req.params;
+
+      const deletedShare = await db
+        .delete(folderShares)
+        .where(eq(folderShares.id, Number(shareId)))
+        .returning();
+
+      if (deletedShare.length === 0) {
+        return res.status(404).json({ error: "Share not found" });
+      }
+
+      DatabaseSaveTrigger.trigger();
+
+      sshLogger.info("Folder share revoked", {
+        operation: "folder_share_revoked",
+        shareId,
+        revokedBy: userId,
+      });
+
+      res.json({ message: "Share revoked successfully" });
+    } catch (error) {
+      sshLogger.error("Error revoking folder share", error, {
+        operation: "folder_share_revoke_error",
         userId,
       });
       res.status(500).json({ error: "Internal server error" });
